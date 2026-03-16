@@ -48,8 +48,8 @@ for key, default in [
     ('mode','Top'), ('active_df',pd.DataFrame()), ('wrong_df',pd.DataFrame()),
     ('q_idx',0), ('attempts',0), ('correct_count',0), ('last_input',''),
     ('used_ids',[]), ('is_error_mode',False),
-    ('error_order','ランダム'), ('error_count',10),
-    ('confirm_exit',False)
+    ('error_order','ランダム（件数指定）'), ('error_count',10), ('error_days', 5),
+    ('confirm_exit',False), ('clear_key', 0)
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -60,7 +60,8 @@ def clean(text):
 
 def check_answer(idx):
     row = st.session_state.active_df.iloc[idx]
-    user_input = st.session_state.get(f"ans_{idx}", "")
+    # 動的なキーから値を取得
+    user_input = st.session_state.get(f"ans_{idx}_{st.session_state.clear_key}", "")
     target_en = str(row['English'])
     st.session_state.last_input = user_input
     if clean(user_input) == clean(target_en):
@@ -109,7 +110,8 @@ elif st.session_state.mode=="RangeSelect":
             st.session_state.update(
                 mode="Quiz", active_df=temp_df, q_idx=0,
                 correct_count=0, attempts=0, last_input="",
-                wrong_df=pd.DataFrame(), is_error_mode=False
+                wrong_df=pd.DataFrame(), is_error_mode=False,
+                clear_key=0
             ); st.rerun()
     if st.button("🏠 戻る"): st.session_state.mode="Top"; st.rerun()
 
@@ -124,18 +126,34 @@ elif st.session_state.mode=="ErrorFixSetup":
         if st.button("🏠 戻る"): st.session_state.mode="Top"; st.rerun()
     else:
         st.write(f"現在、修正可能な聞き間違いが {len(available_pool)} 問あるざんす。")
-        order = st.selectbox("出題方法を選択してください", ["ランダム","最新順","古い順"], key="error_order")
-        max_q = len(available_pool)
-        count = st.number_input(f"何問出題するざんすか？ (最大 {max_q})", 1, max_q, value=min(10,max_q), key="error_count")
+        order = st.selectbox("出題方法を選択してください", ["ランダム（件数指定）", "最新順から（日数指定）", "古い順から（日数指定）"], key="error_order")
+        
+        if "ランダム" in order:
+            max_q = len(available_pool)
+            count = st.number_input(f"何問出題するざんすか？ (最大 {max_q})", 1, max_q, value=min(10,max_q), key="error_count")
+        else:
+            days = st.number_input("何日分（放送日ベース）のデータを対象にするざんすか？", 1, 365, value=st.session_state.error_days, key="error_days_input")
+
         if st.button("🔥 特訓開始"):
-            if order=="ランダム": temp_df=available_pool.sample(n=int(count)).reset_index(drop=True)
-            elif order=="最新順": temp_df=available_pool.sort_values("Date_dt", ascending=False).head(int(count)).reset_index(drop=True)
-            else: temp_df=available_pool.sort_values("Date_dt", ascending=True).head(int(count)).reset_index(drop=True)
-            st.session_state.update(
-                mode="Quiz", active_df=temp_df, q_idx=0,
-                correct_count=0, attempts=0, last_input="",
-                wrong_df=pd.DataFrame(), is_error_mode=True
-            ); st.rerun()
+            if "ランダム" in order:
+                temp_df = available_pool.sample(n=int(count)).reset_index(drop=True)
+            else:
+                is_latest = "最新" in order
+                unique_dates = sorted(available_pool['Date_dt'].unique(), reverse=is_latest)
+                target_dates = unique_dates[:int(days)]
+                temp_df = available_pool[available_pool['Date_dt'].isin(target_dates)].reset_index(drop=True)
+                if not is_latest: # 古い順の場合は並び替え
+                    temp_df = temp_df.sort_values("Date_dt", ascending=True)
+
+            if temp_df.empty:
+                st.warning("該当するデータがないざんす！")
+            else:
+                st.session_state.update(
+                    mode="Quiz", active_df=temp_df, q_idx=0,
+                    correct_count=0, attempts=0, last_input="",
+                    wrong_df=pd.DataFrame(), is_error_mode=True,
+                    clear_key=0
+                ); st.rerun()
     if st.button("🏠 戻る"): st.session_state.mode="Top"; st.rerun()
 
 # --- 7. クイズ画面 ---
@@ -147,24 +165,34 @@ elif st.session_state.mode=="Quiz":
         target_en = str(row['English'])
         st.caption(f"Problem {st.session_state.q_idx+1}/{len(f_df)} (Date: {row['Date']}, No.{row['No']})")
         st.subheader("👂 聞き間違いを修正するざんす！" if is_error_mode else f"Q: {row['Japanese']}")
+        
+        # デフォルト表示の制御
         default_val = row['Listening'] if is_error_mode and st.session_state.attempts==0 else st.session_state.last_input
         is_locked = st.session_state.attempts==10 or st.session_state.attempts>=4
 
-        with st.form(key=f"form_{st.session_state.q_idx}", clear_on_submit=False):
+        # フォームのkeyにclear_keyを含めることで全体をリフレッシュ
+        with st.form(key=f"form_{st.session_state.q_idx}_{st.session_state.clear_key}", clear_on_submit=False):
             user_input = st.text_input(
                 f"解答 ({min(st.session_state.attempts+1,4)}/4回目)",
                 value=default_val,
-                key=f"ans_{st.session_state.q_idx}",
+                key=f"ans_{st.session_state.q_idx}_{st.session_state.clear_key}",
                 disabled=is_locked
             )
-            col1,col2 = st.columns(2)
-            with col1: submit_btn = st.form_submit_button("判定")
-            with col2: next_btn = st.form_submit_button("次の問題へ")
+            col1, col2, col3 = st.columns([1, 1, 1.2])
+            with col1: 
+                submit_btn = st.form_submit_button("判定")
+            with col2:
+                if st.form_submit_button("クリア"):
+                    st.session_state.last_input = ""
+                    st.session_state.clear_key += 1
+                    st.rerun()
+            with col3: 
+                next_btn = st.form_submit_button("次の問題へ")
 
             if submit_btn and not is_locked: check_answer(st.session_state.q_idx); st.rerun()
             if next_btn:
                 if st.session_state.attempts<4: st.session_state.wrong_df=pd.concat([st.session_state.wrong_df,row.to_frame().T]).drop_duplicates()
-                st.session_state.update(q_idx=st.session_state.q_idx+1, attempts=0, last_input=""); st.rerun()
+                st.session_state.update(q_idx=st.session_state.q_idx+1, attempts=0, last_input="", clear_key=0); st.rerun()
 
         if 1<=st.session_state.attempts<=3:
             target_ws = target_en.split()
@@ -203,12 +231,12 @@ elif st.session_state.mode=="Quiz":
         st.metric(label="正解数", value=f"{st.session_state.correct_count}/{len(f_df)}")
         col1,col2 = st.columns(2)
         with col1:
-            if st.button("🔄 全問リトライ"): st.session_state.update(q_idx=0, correct_count=0, attempts=0, last_input="", wrong_df=pd.DataFrame()); st.rerun()
+            if st.button("🔄 全問リトライ"): st.session_state.update(q_idx=0, correct_count=0, attempts=0, last_input="", wrong_df=pd.DataFrame(), clear_key=0); st.rerun()
         with col2:
             if not st.session_state.wrong_df.empty:
                 if st.button("🔥 間違えた問題だけをリトライ"):
                     st.session_state.update(
                         active_df=st.session_state.wrong_df.reset_index(drop=True),
-                        q_idx=0, correct_count=0, attempts=0, last_input="", wrong_df=pd.DataFrame()
+                        q_idx=0, correct_count=0, attempts=0, last_input="", wrong_df=pd.DataFrame(), clear_key=0
                     ); st.rerun()
         if st.button("🏠 メニューに戻る"): st.session_state.update(mode="Top", is_error_mode=False); st.rerun()
