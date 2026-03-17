@@ -9,12 +9,14 @@ SHEET_ID = "1usIv38xEO6KLAi3x8jxuZPuIgimQ0FUd4NEeeZPjVpA"
 GID = "2094303905"
 CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID}"
 
-@st.cache_data
+# ttl=3600 を追加して1時間ごとに自動更新されるようにしました
+@st.cache_data(ttl=3600)
 def load_and_process_data():
     df = pd.read_csv(CSV_URL)
-    df.rename(columns={'English(original)': 'Listening','English': 'English'}, inplace=True)
-    df = df.iloc[:,0:7]
-    df.columns = ['Date','Week','Day','No','Japanese','Listening','English']
+    # H列まで読み込むため、ilocを0:8に変更
+    df = df.iloc[:, 0:8]
+    df.columns = ['Date','Week','Day','No','Japanese','Listening','English', 'Explanation']
+    
     df['Date_dt'] = pd.to_datetime(df['Date'], errors='coerce')
 
     def get_broadcast_info(row):
@@ -37,7 +39,7 @@ def load_and_process_data():
     df['FY'] = broadcast_info[0].astype(int)
     df['B_Month'] = broadcast_info[1].astype(int)
 
-    for col in ['Week','Day','Japanese','Listening','English']:
+    for col in ['Week','Day','Japanese','Listening','English', 'Explanation']:
         df[col] = df[col].astype(str).str.strip()
     return df.dropna(subset=['English']).reset_index(drop=True)
 
@@ -60,7 +62,6 @@ def clean(text):
 
 def check_answer(idx):
     row = st.session_state.active_df.iloc[idx]
-    # 動的なキーから値を取得
     user_input = st.session_state.get(f"ans_{idx}_{st.session_state.clear_key}", "")
     target_en = str(row['English'])
     st.session_state.last_input = user_input
@@ -142,7 +143,7 @@ elif st.session_state.mode=="ErrorFixSetup":
                 unique_dates = sorted(available_pool['Date_dt'].unique(), reverse=is_latest)
                 target_dates = unique_dates[:int(days)]
                 temp_df = available_pool[available_pool['Date_dt'].isin(target_dates)].reset_index(drop=True)
-                if not is_latest: # 古い順の場合は並び替え
+                if not is_latest:
                     temp_df = temp_df.sort_values("Date_dt", ascending=True)
 
             if temp_df.empty:
@@ -166,11 +167,9 @@ elif st.session_state.mode=="Quiz":
         st.caption(f"Problem {st.session_state.q_idx+1}/{len(f_df)} (Date: {row['Date']}, No.{row['No']})")
         st.subheader("👂 聞き間違いを修正するざんす！" if is_error_mode else f"Q: {row['Japanese']}")
         
-        # デフォルト表示の制御
         default_val = row['Listening'] if is_error_mode and st.session_state.attempts==0 else st.session_state.last_input
         is_locked = st.session_state.attempts==10 or st.session_state.attempts>=4
 
-        # フォームのkeyにclear_keyを含めることで全体をリフレッシュ
         with st.form(key=f"form_{st.session_state.q_idx}_{st.session_state.clear_key}", clear_on_submit=False):
             user_input = st.text_input(
                 f"解答 ({min(st.session_state.attempts+1,4)}/4回目)",
@@ -211,8 +210,13 @@ elif st.session_state.mode=="Quiz":
                 if is_error_mode and row.name not in st.session_state.used_ids: st.session_state.used_ids.append(row.name)
             else:
                 st.error(f"❌ 残念！正解は: {target_en}")
+            
+            # --- 追加: 解説の表示 ---
+            if is_error_mode:
+                exp = str(row['Explanation'])
+                if exp and exp != "nan" and exp.strip() != "":
+                    st.info(f"📖 **Explanation**\n\n{exp}")
 
-        # 中止確認
         if not st.session_state.confirm_exit:
             if st.button("中止してメニューへ"):
                 st.session_state.confirm_exit=True; st.rerun()
