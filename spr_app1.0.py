@@ -9,14 +9,11 @@ SHEET_ID = "1usIv38xEO6KLAi3x8jxuZPuIgimQ0FUd4NEeeZPjVpA"
 GID = "2094303905"
 CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID}"
 
-# ttl=3600 を追加して1時間ごとに自動更新されるようにしました
 @st.cache_data(ttl=3600)
 def load_and_process_data():
     df = pd.read_csv(CSV_URL)
-    # H列まで読み込むため、ilocを0:8に変更
     df = df.iloc[:, 0:8]
     df.columns = ['Date','Week','Day','No','Japanese','Listening','English', 'Explanation']
-    
     df['Date_dt'] = pd.to_datetime(df['Date'], errors='coerce')
 
     def get_broadcast_info(row):
@@ -170,6 +167,7 @@ elif st.session_state.mode=="Quiz":
         default_val = row['Listening'] if is_error_mode and st.session_state.attempts==0 else st.session_state.last_input
         is_locked = st.session_state.attempts==10 or st.session_state.attempts>=4
 
+        # 安定動作のための st.form
         with st.form(key=f"form_{st.session_state.q_idx}_{st.session_state.clear_key}", clear_on_submit=False):
             user_input = st.text_input(
                 f"解答 ({min(st.session_state.attempts+1,4)}/4回目)",
@@ -177,22 +175,28 @@ elif st.session_state.mode=="Quiz":
                 key=f"ans_{st.session_state.q_idx}_{st.session_state.clear_key}",
                 disabled=is_locked
             )
-            col1, col2, col3 = st.columns([1, 1, 1.2])
-            with col1: 
-                submit_btn = st.form_submit_button("判定")
-            with col2:
-                if st.form_submit_button("クリア"):
-                    st.session_state.last_input = ""
-                    st.session_state.clear_key += 1
-                    st.rerun()
-            with col3: 
-                next_btn = st.form_submit_button("次の問題へ")
+            
+            # ボタンを縦に並べる
+            # フォーム内で最初にあるこのボタンが Enter キーに反応します
+            submit_btn = st.form_submit_button("判定", use_container_width=True)
+            clear_btn = st.form_submit_button("クリア", use_container_width=True)
+            next_btn = st.form_submit_button("次の問題へ", use_container_width=True)
 
-            if submit_btn and not is_locked: check_answer(st.session_state.q_idx); st.rerun()
+            # --- ボタンロジック ---
+            if clear_btn:
+                st.session_state.last_input = ""
+                st.session_state.clear_key += 1
+                st.rerun()
+            if submit_btn and not is_locked: 
+                check_answer(st.session_state.q_idx)
+                st.rerun()
             if next_btn:
-                if st.session_state.attempts<4: st.session_state.wrong_df=pd.concat([st.session_state.wrong_df,row.to_frame().T]).drop_duplicates()
-                st.session_state.update(q_idx=st.session_state.q_idx+1, attempts=0, last_input="", clear_key=0); st.rerun()
+                if st.session_state.attempts < 4:
+                    st.session_state.wrong_df = pd.concat([st.session_state.wrong_df, row.to_frame().T]).drop_duplicates()
+                st.session_state.update(q_idx=st.session_state.q_idx+1, attempts=0, last_input="", clear_key=0)
+                st.rerun()
 
+        # ヒント・音声・判定
         if 1<=st.session_state.attempts<=3:
             target_ws = target_en.split()
             user_ws = st.session_state.last_input.split()
@@ -210,13 +214,13 @@ elif st.session_state.mode=="Quiz":
                 if is_error_mode and row.name not in st.session_state.used_ids: st.session_state.used_ids.append(row.name)
             else:
                 st.error(f"❌ 残念！正解は: {target_en}")
-            
-            # --- 追加: 解説の表示 ---
             if is_error_mode:
                 exp = str(row['Explanation'])
                 if exp and exp != "nan" and exp.strip() != "":
                     st.info(f"📖 **Explanation**\n\n{exp}")
 
+        # 中止
+        st.divider()
         if not st.session_state.confirm_exit:
             if st.button("中止してメニューへ"):
                 st.session_state.confirm_exit=True; st.rerun()
