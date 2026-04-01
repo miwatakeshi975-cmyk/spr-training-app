@@ -37,18 +37,18 @@ df = load_and_process_data()
 defaults = [
     ('mode','Top'), ('active_df',pd.DataFrame()), ('wrong_df',pd.DataFrame()),
     ('q_idx',0), ('attempts',0), ('correct_count',0), ('last_input',''),
-    ('used_ids',[]), ('is_error_mode',False), ('confirm_exit',False), ('clear_key', 0),
+    ('used_ids',[]), ('is_error_mode',False), ('is_keyword_mode', False), ('confirm_exit',False), ('clear_key', 0),
     ('search_keyword_en', ''), ('search_keyword_jp', ''),
     ('error_order','ランダム（件数指定）'), ('error_count',10), ('error_days', 5)
 ]
 for key, val in defaults:
     if key not in st.session_state: st.session_state[key] = val
 
-def start_quiz(target_df, is_error=False):
+def start_quiz(target_df, is_error=False, is_keyword=False):
     st.session_state.update(
         mode="Quiz", active_df=target_df, q_idx=0, correct_count=0, 
         attempts=0, last_input="", wrong_df=pd.DataFrame(), 
-        is_error_mode=is_error, clear_key=0, confirm_exit=False
+        is_error_mode=is_error, is_keyword_mode=is_keyword, clear_key=0, confirm_exit=False
     )
     st.rerun()
 
@@ -114,7 +114,7 @@ elif st.session_state.mode == "KeywordSearch":
 
     if k_input:
         st.info(f"「{k_input}」を含む問題が {len(target_df)} 問見つかったざんす。")
-        if not target_df.empty and st.button("🚀 特訓を開始する", use_container_width=True): start_quiz(target_df)
+        if not target_df.empty and st.button("🚀 特訓を開始する", use_container_width=True): start_quiz(target_df, is_keyword=True)
     if st.button("🏠 戻る"): st.session_state.mode="Top"; st.rerun()
 
 elif st.session_state.mode == "ErrorFixSetup":
@@ -144,11 +144,9 @@ elif st.session_state.mode == "Quiz":
         st.caption(f"Problem {st.session_state.q_idx+1}/{len(f_df)} ({row['Date']} No.{row['No']})")
         st.subheader("👂 聞き間違い修正！" if is_err else f"Q: {row['Japanese']}")
         
-        # 解決（正解10または失敗4）時にTrue
         locked = st.session_state.attempts in [4, 10]
         
         with st.form(key=f"q_{st.session_state.q_idx}_{st.session_state.clear_key}"):
-            # 入力欄のロック
             ans = st.text_input(
                 f"解答 ({min(st.session_state.attempts+1, 4)}/4)", 
                 value=row['Listening'] if (is_err and st.session_state.attempts==0) else st.session_state.last_input, 
@@ -156,19 +154,16 @@ elif st.session_state.mode == "Quiz":
                 disabled=locked
             )
             
-            # 判定ボタン：disabledで物理ロックし、if文で内部処理を遮断
             if st.form_submit_button("判定", use_container_width=True, disabled=locked):
                 if not locked:
                     check_answer(st.session_state.q_idx)
                     st.rerun()
                 
-            # クリアボタン：disabledで物理ロックし、if文で内部処理を遮断
             if st.form_submit_button("クリア", use_container_width=True, disabled=locked):
                 if not locked:
                     st.session_state.update(last_input="", clear_key=st.session_state.clear_key+1)
                     st.rerun()
                 
-            # 次の問題へ：これは常に有効
             if st.form_submit_button("次の問題へ", use_container_width=True):
                 if st.session_state.attempts < 4: 
                     st.session_state.wrong_df = pd.concat([st.session_state.wrong_df, row.to_frame().T]).drop_duplicates()
@@ -202,7 +197,7 @@ elif st.session_state.mode == "Quiz":
             st.warning("本当に中止しますか？")
             c1, c2 = st.columns(2)
             if c1.button("はい"): 
-                st.session_state.update(mode="Top", is_error_mode=False, confirm_exit=False)
+                st.session_state.update(mode="Top", is_error_mode=False, is_keyword_mode=False, confirm_exit=False)
                 st.rerun()
             if c2.button("いいえ"): 
                 st.session_state.confirm_exit=False
@@ -210,8 +205,27 @@ elif st.session_state.mode == "Quiz":
     else:
         st.header("🏁 特訓終了")
         st.metric("正解数", f"{st.session_state.correct_count}/{len(f_df)}")
+        
         c1, c2 = st.columns(2)
-        if c1.button("🔄 全問リトライ"): st.session_state.update(q_idx=0, correct_count=0, attempts=0, last_input="", wrong_df=pd.DataFrame(), clear_key=0); st.rerun()
-        if c2.button("🔥 ミスのみリトライ") and not st.session_state.wrong_df.empty:
-            start_quiz(st.session_state.wrong_df.reset_index(drop=True), is_error=st.session_state.is_error_mode)
-        if st.button("🏠 メニューに戻る"): st.session_state.update(mode="Top", is_error_mode=False); st.rerun()
+        if c1.button("🔄 全問リトライ", use_container_width=True): 
+            st.session_state.update(q_idx=0, correct_count=0, attempts=0, last_input="", wrong_df=pd.DataFrame(), clear_key=0); st.rerun()
+        if c2.button("🔥 ミスのみリトライ", use_container_width=True) and not st.session_state.wrong_df.empty:
+            start_quiz(st.session_state.wrong_df.reset_index(drop=True), is_error=st.session_state.is_error_mode, is_keyword=st.session_state.is_keyword_mode)
+            
+        st.divider()
+        
+        # モードに合わせて戻り先を判定
+        if st.session_state.is_error_mode:
+            btn_label, back_mode = "👂 出題設定（Fix Your Hearing）に戻る", "ErrorFixSetup"
+        elif st.session_state.is_keyword_mode:
+            btn_label, back_mode = "🔍 検索画面（表現指定特訓）に戻る", "KeywordSearch"
+        else:
+            btn_label, back_mode = "📅 出題範囲の設定に戻る", "RangeSelect"
+
+        if st.button(btn_label, use_container_width=True):
+            st.session_state.update(mode=back_mode, is_error_mode=False, is_keyword_mode=False)
+            st.rerun()
+            
+        if st.button("🏠 メニュー（Top）に戻る", use_container_width=True):
+            st.session_state.update(mode="Top", is_error_mode=False, is_keyword_mode=False)
+            st.rerun()
