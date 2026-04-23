@@ -10,6 +10,7 @@ import base64
 import os
 import datetime
 from gtts import gTTS
+from collections import Counter
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -192,6 +193,7 @@ def load_and_process_data():
         
     return df.dropna(subset=['English']).reset_index(drop=True)
 
+
 # --- 2. 状態管理 ---
 defaults = [
     ('mode', 'Top'), ('active_df', pd.DataFrame()), ('wrong_df', pd.DataFrame()),
@@ -242,7 +244,7 @@ def check_answer(idx):
         st.session_state.attempts += 1
         if st.session_state.attempts >= 4:
             st.session_state.scores[idx] = False
-            st.session_state.wrong_df = pd.concat([st.session_state.wrong_df, row.to_frame().T]).drop_duplicates()
+            st.session_state[f"force_retry_{idx}"] = True
 
 def cleanup_old_session_keys(q_idx, clear_key):
     """不要になった解答キーを削除してメモリリークを防ぐ"""
@@ -258,7 +260,7 @@ def cleanup_old_session_keys(q_idx, clear_key):
 
 # --- 4. 画面コンポーネント関数 ---
 def render_top():
-    st.title("🌟 SPR Training V3.2")
+    st.title("🌟 SPR Training V3.3")
     st.markdown("モダンで楽しい学習体験へようこそ。")
     st.divider()
     
@@ -385,7 +387,6 @@ def render_keyword_search():
     df = st.session_state.df_master
     st.header("🔍 表現指定特訓")
     
-    st.markdown("💡 **おすすめキーワード:** `get` `take` `have` `make` `mind` `time` `about` `turn` `out`")
     
     def on_keyword_change(target):
         if target == "en": 
@@ -456,7 +457,11 @@ def render_quiz():
         
         c1, c2 = st.columns([3, 1])
         c1.subheader("👂 聞き間違い修正！" if is_err else f"Q: {row['Japanese']}")
-        c2.markdown(f"<div style='text-align:right; color:#888;'>Question <b>{st.session_state.q_idx+1} / {len(f_df)}</b></div>", unsafe_allow_html=True)
+        
+        # 出題中の問題が「いつの」ものかを表示
+        scope_str = f"{row.get('FY', '')}年度 {row.get('B_Month', '')}月 {row.get('Week', '')} Day{row.get('Day', '')}"
+        
+        c2.markdown(f"<div style='text-align:right; color:#888;'><span style='font-size:0.8em;'>{scope_str}</span><br/>Question <b>{st.session_state.q_idx+1} / {len(f_df)}</b></div>", unsafe_allow_html=True)
         
         st.divider()
         locked = st.session_state.attempts in [4, 10]
@@ -482,7 +487,7 @@ def render_quiz():
                         st.rerun()
             with c_btn3:
                 if st.form_submit_button("⏭️ 次へ進む", use_container_width=True):
-                    if st.session_state.attempts < 4: 
+                    if st.session_state.get(f"force_retry_{st.session_state.q_idx}", False): 
                         st.session_state.wrong_df = pd.concat([st.session_state.wrong_df, row.to_frame().T]).drop_duplicates()
                     cleanup_old_session_keys(st.session_state.q_idx, st.session_state.clear_key)
                     st.session_state.update(q_idx=st.session_state.q_idx+1, attempts=0, last_input="", clear_key=0, is_typo=False)
@@ -525,6 +530,26 @@ def render_quiz():
             
             if is_err and str(row['Explanation']).strip() not in ["", "nan"]: 
                 st.info(f"📖 {row['Explanation']}")
+
+        st.divider()
+        
+        chk_key = f"force_retry_{st.session_state.q_idx}"
+        ui_key = f"ui_check_{st.session_state.q_idx}"
+        
+        if chk_key not in st.session_state:
+            st.session_state[chk_key] = False
+            
+        if ui_key not in st.session_state:
+            st.session_state[ui_key] = st.session_state[chk_key]
+            
+        # 確実に内部ステータスとUIを同期（プログラムからの変更を優先）
+        if st.session_state[chk_key] != st.session_state[ui_key]:
+            st.session_state[ui_key] = st.session_state[chk_key]
+
+        def sync_check(c_key=chk_key, u_key=ui_key):
+            st.session_state[c_key] = st.session_state[u_key]
+
+        st.checkbox("🔄 この問題をリトライ対象にチェックする", key=ui_key, on_change=sync_check)
 
         st.divider()
         if not st.session_state.confirm_exit:
@@ -585,36 +610,30 @@ def render_quiz_results(f_df):
             st.rerun()
         
     with c_retry2:
-        if st.button("🔥 間違えた問題だけリトライ", type="primary", use_container_width=True, disabled=st.session_state.wrong_df.empty):
+        if st.button("🔥 チェックした問題をリトライ", type="primary", use_container_width=True, disabled=st.session_state.wrong_df.empty):
             if not st.session_state.wrong_df.empty:
                 start_quiz(st.session_state.wrong_df.reset_index(drop=True), is_error=st.session_state.is_error_mode, is_keyword=st.session_state.is_keyword_mode)
                 
-    # --- 追加: 通常モードで、次のDayがあれば進行ボタンを表示 ---
+    # --- 次のDayがあれば進行ボタンを表示 ---
     if not st.session_state.is_error_mode and not st.session_state.is_keyword_mode:
         current_day = st.session_state.get('active_bd', 'すべて')
         if current_day != "すべて":
             df = st.session_state.df_master
-            # スプレッドシート上の登場順（時系列）の固有な 日付組み合わせ をリスト化
             unique_days = df[['FY', 'B_Month', 'Week', 'Day']].drop_duplicates().values.tolist()
-            
             fy, bm, bw = st.session_state.get('active_fy'), st.session_state.get('active_bm'), st.session_state.get('active_bw')
             
-            # 現在のDayがリスト上で何番目かを探す
             current_idx = -1
             for i, (y, m, w, d) in enumerate(unique_days):
-                # 完全一致（Weekが"すべて"だった場合はDayだけで一致箇所を見つける）
                 if y == fy and m == bm and (bw == "すべて" or w == bw) and d == current_day:
                     current_idx = i
                     break
             
-            # 次のDayが存在する場合
             if current_idx != -1 and current_idx + 1 < len(unique_days):
                 next_y, next_m, next_w, next_d = unique_days[current_idx + 1]
                 
                 st.divider()
                 st.subheader("⏭️ 続けて次のステップへ")
                 
-                # 週や月が変わった場合はラベルに補足する
                 label_extra = ""
                 if next_y != fy or next_m != bm:
                     label_extra = f" ({next_y}年度 {next_m}月)"
@@ -622,7 +641,6 @@ def render_quiz_results(f_df):
                     label_extra = f" ({next_w})"
                 
                 if st.button(f"🚀 Day{next_d}{label_extra} の特訓に進む", type="primary", use_container_width=True):
-                    # 次のDayへ状態を更新して特訓開始
                     st.session_state.active_fy = next_y
                     st.session_state.active_bm = next_m
                     st.session_state.active_bw = next_w
@@ -635,11 +653,7 @@ def render_quiz_results(f_df):
                 st.divider()
                 st.success("現在の最新回まで到達しました")
     
-    # --- 追加: キーワードモードの場合、次のおすすめを表示 ---
-    if st.session_state.is_keyword_mode:
-        st.divider()
-        st.info("💡 **次のおすすめキーワード:** `get` `take` `have` `make` `mind` `time` `about` `turn` `out`")
-        
+
     st.divider()
     c_back1, c_back2 = st.columns(2)
     
