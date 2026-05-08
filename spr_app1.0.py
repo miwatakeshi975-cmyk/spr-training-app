@@ -10,7 +10,6 @@ import base64
 import os
 import datetime
 from gtts import gTTS
-from collections import Counter
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -103,32 +102,61 @@ def save_history(mode_name, df_attempted, scores):
         
     new_data = pd.DataFrame(rows)
     
-    if os.path.exists(HISTORY_FILE):
-        try:
-            history_df = pd.read_csv(HISTORY_FILE, encoding="utf-8-sig")
-            history_df = pd.concat([history_df, new_data], ignore_index=True)
-        except UnicodeDecodeError:
-            try:
-                # 既存ファイルがExcel標準保存など（Shift-JIS）の場合へのフォールバック
-                history_df = pd.read_csv(HISTORY_FILE, encoding="shift_jis")
-                history_df = pd.concat([history_df, new_data], ignore_index=True)
-            except UnicodeDecodeError:
-                # それでもダメな場合のフォールバック
-                history_df = pd.read_csv(HISTORY_FILE, encoding="cp932")
-                history_df = pd.concat([history_df, new_data], ignore_index=True)
+    existing_df = load_history_df()
+    if not existing_df.empty:
+        history_df = pd.concat([existing_df, new_data], ignore_index=True)
     else:
         history_df = new_data
         
     # 文字化け防止のため utf-8-sig で保存
     history_df.to_csv(HISTORY_FILE, index=False, encoding="utf-8-sig")
 
+# --- Utils & Helpers ---
+def load_history_df():
+    """履歴CSVを安全に読み込み、DataFrameを返す（文字化け対策済み）"""
+    if not os.path.exists(HISTORY_FILE):
+        return pd.DataFrame()
+        
+    try:
+        return pd.read_csv(HISTORY_FILE, encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            return pd.read_csv(HISTORY_FILE, encoding="shift_jis")
+        except UnicodeDecodeError:
+            return pd.read_csv(HISTORY_FILE, encoding="cp932")
+
+def navigate_to(target_mode, **kwargs):
+    """指定した画面へ安全に遷移し、関連するUIフラグをリセットする"""
+    st.session_state.update(
+        mode=target_mode,
+        is_error_mode=False,
+        is_keyword_mode=False,
+        confirm_exit=False,
+        is_typo=False,
+        **kwargs
+    )
+    st.rerun()
+
 # --- Audio Generators ---
 @st.cache_data
 def get_success_audio_base64():
-    """正解時の楽しいチャイム音（アルペジオ）を生成してBase64で返す"""
+    """正解時の楽しいチャイム音を生成してBase64で返す"""
+    
+    # 🌟 ここから下の数値を変更すると音が変わります 🌟
+    
+    # 音の長さ（秒）
+    duration = 0.6
+    
+    # 周波数（音の高さ）のリスト。左から右へ順番に鳴ります。
+    # 同じ数字を連続させると、その音だけ長く鳴ります。
+    # 【例1】ピンポン♪ : [1318.51, 1318.51, 1046.50, 1046.50]
+    # 【例2】レベルアップ音 : [523.25, 587.33, 659.25, 783.99, 1046.50, 1046.50, 1046.50]
+    # 【例3】コイン音 : [987.77, 1318.51] (durationは0.2など短くする)
+    frequencies = [523.25, 587.33, 659.25, 783.99, 1046.50, 1046.50, 1046.50]
+    
+    # 🌟 ここまで 🌟
+    
     sample_rate = 44100
-    duration = 0.4
-    frequencies = [1046.50, 1318.51, 1567.98, 2093.00]
     num_samples = int(duration * sample_rate)
     audio = []
     
@@ -139,8 +167,14 @@ def get_success_audio_base64():
         freq = frequencies[note_idx]
         
         local_progress = (progress * len(frequencies)) % 1.0
-        envelope = max(0, 1.0 - local_progress)
-        val = 16000 * envelope * math.sin(2 * math.pi * freq * i / sample_rate)
+        
+        # より自然な音にするためのエンベロープ（減衰）
+        if local_progress < 0.05:
+            envelope = local_progress / 0.05 # アタック
+        else:
+            envelope = max(0, 1.0 - ((local_progress - 0.05) / 0.95)) # ディケイ
+            
+        val = 20000 * envelope * math.sin(2 * math.pi * freq * i / sample_rate)
         audio.append(int(val))
 
     buffer = io.BytesIO()
@@ -208,14 +242,24 @@ for key, val in defaults:
     if key not in st.session_state: 
         st.session_state[key] = val
 
-def start_quiz(target_df, is_error=False, is_keyword=False):
+def start_quiz(target_df, is_error=False, is_keyword=False, rerun=True):
     st.session_state.update(
-        mode="Quiz", active_df=target_df, q_idx=0, correct_count=0, 
+        mode="Quiz", active_df=target_df, original_df=target_df.copy(), q_idx=0, correct_count=0, 
         attempts=0, last_input="", wrong_df=pd.DataFrame(), 
         is_error_mode=is_error, is_keyword_mode=is_keyword, clear_key=0, confirm_exit=False, is_typo=False,
         history_saved=False, scores={} # 新しいクイズが始まったので保存フラグと成績辞書をリセット
     )
-    st.rerun()
+    # Reset mini search keywords safely
+    for key in ["mini_search_en", "mini_search_jp"]:
+        if key in st.session_state:
+            try:
+                st.session_state[key] = ""
+            except:
+                # If widget is already instantiated, we can't modify it directly in this run.
+                # However, calling via on_click or using try-except prevents the crash.
+                pass
+    if rerun:
+        st.rerun()
 
 # --- 3. 判定ロジック ---
 def clean(text):
@@ -266,38 +310,27 @@ def render_top():
     
     st.info("### 1. 📅 通常クイズ\n\n最新の過去問や、指定した対象月の特訓を行います。日々のルーティンに。")
     if st.button("始める", key="top_btn_1", use_container_width=True):
-        st.session_state.mode = "RangeSelect"
-        st.rerun()
+        navigate_to("RangeSelect")
 
     st.warning("### 2. 👂 弱点克服\n\n自分が聞き間違えやすいディクテーションのミスを徹底的に復習。")
     if st.button("始める", key="top_btn_2", use_container_width=True):
-        st.session_state.mode = "ErrorFixSetup"
-        st.rerun()
+        navigate_to("ErrorFixSetup")
             
     st.success("### 3. 🔍 キーワード検索\n\n特定の英単語や日本語のフレーズを含む問題だけを集中的に練習。")
     if st.button("始める", key="top_btn_3", use_container_width=True):
-        st.session_state.mode = "KeywordSearch"
-        st.rerun()
+        navigate_to("KeywordSearch")
         
     st.divider()
     st.subheader("📊 継続は力なり！")
     if st.button("📈 学習記録（履歴）を見る", use_container_width=True):
-        st.session_state.mode = "History"
-        st.rerun()
+        navigate_to("History")
 
 def render_history():
     st.title("📈 学習履歴ダッシュボード")
     
-    if os.path.exists(HISTORY_FILE):
-        try:
-            df_hist = pd.read_csv(HISTORY_FILE, encoding="utf-8-sig")
-        except UnicodeDecodeError:
-            try:
-                df_hist = pd.read_csv(HISTORY_FILE, encoding="shift_jis")
-            except UnicodeDecodeError:
-                df_hist = pd.read_csv(HISTORY_FILE, encoding="cp932")
-            
-        if not df_hist.empty:
+    df_hist = load_history_df()
+    
+    if not df_hist.empty:
             
             # 安全のため、カラムの存在チェックをしてエラーを防ぐ
             total_col = 'Total Questions' if 'Total Questions' in df_hist.columns else 'Total Questions'
@@ -324,15 +357,12 @@ def render_history():
             st.subheader("📚 過去の特訓ログ (最新30件)")
             # 最新のものを上にして表示する
             st.dataframe(df_hist.tail(30).iloc[::-1].reset_index(drop=True), use_container_width=True)
-        else:
-            st.info("データが空です。まずはクイズ特訓を始めてみましょう！")
     else:
         st.info("まだ学習履歴がありません。まずはクイズ特訓を始めてみましょう！")
         
     st.divider()
     if st.button("🏠 メニュー（Top）に戻る", use_container_width=True): 
-        st.session_state.mode="Top"
-        st.rerun()
+        navigate_to("Top")
 
 def render_range_select():
     df = st.session_state.df_master
@@ -380,8 +410,7 @@ def render_range_select():
             
     st.divider()
     if st.button("🏠 メニュー（Top）に戻る", use_container_width=True): 
-        st.session_state.mode = "Top"
-        st.rerun()
+        navigate_to("Top")
 
 def render_keyword_search():
     df = st.session_state.df_master
@@ -411,8 +440,7 @@ def render_keyword_search():
             
     st.divider()
     if st.button("🏠 メニュー（Top）に戻る", use_container_width=True): 
-        st.session_state.mode="Top"
-        st.rerun()
+        navigate_to("Top")
 
 def render_error_fix_setup():
     df = st.session_state.df_master
@@ -441,8 +469,7 @@ def render_error_fix_setup():
             
     st.divider()
     if st.button("🏠 メニュー（Top）に戻る", use_container_width=True): 
-        st.session_state.mode="Top"
-        st.rerun()
+        navigate_to("Top")
 
 def render_quiz():
     f_df = st.session_state.active_df
@@ -552,24 +579,41 @@ def render_quiz():
         st.checkbox("🔄 この問題をリトライ対象にチェックする", key=ui_key, on_change=sync_check)
 
         st.divider()
-        if not st.session_state.confirm_exit:
-            if st.button("🏠 中止してメニューへ戻る"): 
+        st.subheader("⚙️ オプション")
+        col_skip, col_finish, col_exit = st.columns(3)
+        with col_skip:
+            if st.button("⏭️ この問題をスキップ", use_container_width=True):
+                cleanup_old_session_keys(st.session_state.q_idx, st.session_state.clear_key)
+                st.session_state.active_df = st.session_state.active_df.drop(st.session_state.q_idx).reset_index(drop=True)
+                st.session_state.update(attempts=0, last_input="", clear_key=0, is_typo=False)
+                st.rerun()
+        with col_finish:
+            if st.button("🏁 この範囲の回答を終了", use_container_width=True):
+                cleanup_old_session_keys(st.session_state.q_idx, st.session_state.clear_key)
+                st.session_state.active_df = st.session_state.active_df.iloc[:st.session_state.q_idx].reset_index(drop=True)
+                st.session_state.update(attempts=0, last_input="", clear_key=0, is_typo=False)
+                st.rerun()
+        with col_exit:
+            if st.button("🏠 中止してメニューへ", use_container_width=True): 
                 st.session_state.confirm_exit=True
                 st.rerun()
-        else:
-            st.warning("本当に特訓を中止しますか？")
+                
+        if st.session_state.confirm_exit:
+            st.warning("本当に特訓を中止しますか？（ここまでの履歴は保存されません）")
             c_exit1, c_exit2 = st.columns(2)
-            if c_exit1.button("はい、終了する"): 
+            if c_exit1.button("はい、終了する", use_container_width=True): 
                 st.session_state.update(mode="Top", is_error_mode=False, is_keyword_mode=False, confirm_exit=False, is_typo=False)
                 st.rerun()
-            if c_exit2.button("いいえ、続ける"): 
+            if c_exit2.button("いいえ、続ける", use_container_width=True): 
                 st.session_state.confirm_exit=False
                 st.rerun()
     else:
         render_quiz_results(f_df)
 
 def render_quiz_results(f_df):
-    # --- 履歴をCSVにDay単位で保存する ---
+    accuracy = (st.session_state.correct_count / len(f_df)) * 100 if len(f_df) > 0 else 0
+    
+    # --- 履歴をCSVにDay単位で保存し、初回のみエフェクトを再生する ---
     if not st.session_state.get('history_saved', True):
         mode_label = "通常クイズ"
         if st.session_state.is_error_mode: 
@@ -581,10 +625,8 @@ def render_quiz_results(f_df):
         save_history(mode_label, f_df, st.session_state.scores)
         st.session_state.history_saved = True
         
-    accuracy = (st.session_state.correct_count / len(f_df)) * 100 if len(f_df) > 0 else 0
-    
-    if accuracy >= 80:
-        st.balloons()
+        if accuracy >= 80:
+            st.balloons()
         
     st.title("🏁 特訓完了！")
     
@@ -606,13 +648,63 @@ def render_quiz_results(f_df):
     c_retry1, c_retry2 = st.columns(2)
     with c_retry1:
         if st.button("🔄 このセットをもう一度全問解く", use_container_width=True): 
-            st.session_state.update(q_idx=0, correct_count=0, attempts=0, last_input="", wrong_df=pd.DataFrame(), clear_key=0, is_typo=False, history_saved=False)
+            restore_df = st.session_state.get('original_df', st.session_state.active_df).copy()
+            st.session_state.update(active_df=restore_df, q_idx=0, correct_count=0, attempts=0, last_input="", wrong_df=pd.DataFrame(), clear_key=0, is_typo=False, history_saved=False)
             st.rerun()
         
     with c_retry2:
         if st.button("🔥 チェックした問題をリトライ", type="primary", use_container_width=True, disabled=st.session_state.wrong_df.empty):
             if not st.session_state.wrong_df.empty:
                 start_quiz(st.session_state.wrong_df.reset_index(drop=True), is_error=st.session_state.is_error_mode, is_keyword=st.session_state.is_keyword_mode)
+                
+    # --- Suggestion for Keyword Search based on checked questions ---
+    if not st.session_state.is_error_mode:
+        st.divider()
+        st.subheader("💡 出題された問題からキーワード特訓")
+        st.markdown("気になった文法や表現（例: used to）を検索して、そのまま特訓を開始できます。")
+        
+        # 出題された問題の振り返り (英文と日本語を別々のアコーディオンに分割)
+        with st.expander("👀 今回出題された問題の英文を確認", expanded=False):
+            for i, row in f_df.iterrows():
+                st.markdown(f"- **{row['English']}**")
+                
+        with st.expander("👀 今回出題された問題の日本語訳を確認", expanded=False):
+            for i, row in f_df.iterrows():
+                st.markdown(f"- {row['Japanese']}")
+                
+        # その場で検索・件数確認ができるミニ検索UI
+        def on_mini_keyword_change(target):
+            if target == "en": 
+                st.session_state.mini_search_jp = ""
+            else: 
+                st.session_state.mini_search_en = ""
+
+        mini_k_en = st.text_input("特訓したい英語キーワードを入力:", key="mini_search_en", placeholder="例: used to, look forward", on_change=on_mini_keyword_change, args=("en",))
+        mini_k_jp = st.text_input("特訓したい日本語キーワードを入力:", key="mini_search_jp", placeholder="例: する予定, かもしれない", on_change=on_mini_keyword_change, args=("jp",))
+        
+        hit_df = pd.DataFrame()
+        k_input = ""
+        df = st.session_state.df_master
+        
+        if mini_k_en:
+            hit_df = df[df['English'].str.contains(mini_k_en, case=False, na=False)].reset_index(drop=True)
+            k_input = mini_k_en
+        elif mini_k_jp:
+            hit_df = df[df['Japanese'].str.contains(mini_k_jp, na=False)].reset_index(drop=True)
+            k_input = mini_k_jp
+            
+        if k_input:
+            if hit_df.empty:
+                st.warning(f"❌ 「{k_input}」を含む問題は見つかりませんでした。別のキーワードを試してください。")
+            else:
+                st.success(f"✅ 「{k_input}」を含む問題が **{len(hit_df)} 問** 見つかりました。多すぎたり少なすぎる場合は、上の検索窓でキーワードを変えてみましょう。")
+                def start_keyword_quiz_callback():
+                    # 本格的な表現指定特訓モードのキーワード入力欄にも同期させる
+                    st.session_state.search_keyword_en = mini_k_en
+                    st.session_state.search_keyword_jp = mini_k_jp
+                    start_quiz(hit_df, is_keyword=True, rerun=False)
+
+                st.button(f"🚀 この {len(hit_df)} 問で特訓を開始する", type="primary", use_container_width=True, on_click=start_keyword_quiz_callback)
                 
     # --- 次のDayがあれば進行ボタンを表示 ---
     if not st.session_state.is_error_mode and not st.session_state.is_keyword_mode:
@@ -640,15 +732,16 @@ def render_quiz_results(f_df):
                 elif next_w != bw and bw != "すべて":
                     label_extra = f" ({next_w})"
                 
-                if st.button(f"🚀 Day{next_d}{label_extra} の特訓に進む", type="primary", use_container_width=True):
+                def start_next_day_callback():
                     st.session_state.active_fy = next_y
                     st.session_state.active_bm = next_m
                     st.session_state.active_bw = next_w
                     st.session_state.active_bd = next_d
-                    
-                    q = f"FY=={next_y} and B_Month=={next_m} and Week=='{next_w}' and Day=='{next_d}'"
-                    next_df = df.query(q).reset_index(drop=True)
-                    start_quiz(next_df)
+                    q_str = f"FY=={next_y} and B_Month=={next_m} and Week=='{next_w}' and Day=='{next_d}'"
+                    target_next_df = df.query(q_str).reset_index(drop=True)
+                    start_quiz(target_next_df, rerun=False)
+
+                st.button(f"🚀 Day{next_d}{label_extra} の特訓に進む", type="primary", use_container_width=True, on_click=start_next_day_callback)
             elif current_idx != -1 and current_idx + 1 >= len(unique_days):
                 st.divider()
                 st.success("現在の最新回まで到達しました")
