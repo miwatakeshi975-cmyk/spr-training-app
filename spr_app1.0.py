@@ -113,8 +113,9 @@ def save_history(mode_name, df_attempted, scores):
 
 # --- Utils & Helpers ---
 def load_history_df():
-    """履歴CSVを安全に読み込み、DataFrameを返す（文字化け対策済み）"""
-    if not os.path.exists(HISTORY_FILE):
+    """履歴CSVを安全に読み込み、DataFrameを返す（文字化け・空ファイル対策済み）"""
+    # ファイルが存在しない、またはファイルサイズが0バイトの場合は空のDataFrameを返す
+    if not os.path.exists(HISTORY_FILE) or os.path.getsize(HISTORY_FILE) == 0:
         return pd.DataFrame()
         
     try:
@@ -124,6 +125,9 @@ def load_history_df():
             return pd.read_csv(HISTORY_FILE, encoding="shift_jis")
         except UnicodeDecodeError:
             return pd.read_csv(HISTORY_FILE, encoding="cp932")
+    except pd.errors.EmptyDataError:
+        # 万が一、中身が空で読み込みエラーが出た場合も安全に空のDataFrameを返す
+        return pd.DataFrame()
 
 def navigate_to(target_mode, **kwargs):
     """指定した画面へ安全に遷移し、関連するUIフラグをリセットする"""
