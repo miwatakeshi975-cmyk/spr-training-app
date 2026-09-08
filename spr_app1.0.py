@@ -228,7 +228,15 @@ def load_and_process_data():
 
     for col in ['Week','Day','Japanese','Listening','English', 'Explanation']:
         df[col] = df[col].astype(str).str.strip()
-        
+
+    # --- ここから追加 ---
+    print("=== [DEBUG 1] 元データ読み込み直後の列一覧 ===")
+    print(df.columns.tolist())
+    print("=== [DEBUG 1] 先頭1行のデータ内容 ===")
+    print(df[['FY', 'B_Month', 'Week', 'Day']].head(1) if set(['FY', 'B_Month', 'Week', 'Day']).issubset(df.columns) else "必要な列が存在しません")
+    # --- ここまで追加 ---
+
+  
     return df.dropna(subset=['English']).reset_index(drop=True)
 
 
